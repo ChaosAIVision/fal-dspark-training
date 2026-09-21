@@ -1,0 +1,41 @@
+model:
+  target_model_path: null
+  trust_remote_code: true
+  embedding_key: model.language_model.embed_tokens.weight
+  lm_head_key: model.language_model.embed_tokens.weight
+  norm_key: model.language_model.norm.weight
+  draft_model_config: configs/single_gpu/dspark_draft_config.json
+dataset:
+  train_data_path: null
+  eval_data_path: null
+  chat_template: qwen
+  prompt_key: conversations
+  min_loss_tokens: 16
+  num_proc: 4
+  shuffle_dataset: false
+training:
+  attention_backend: flex_attention
+  micro_batch_size: 1
+  draft_accumulation_steps: 1
+  max_concurrent_batches: 1
+  max_seq_length: 4096
+  num_epochs: 1
+  training_num_gpus_per_node: 1
+  training_num_nodes: 1
+  ttt_length: 7
+  dflash_block_size: 8
+  dspark_num_anchors: 128
+  dspark_num_target_layers: 8
+inference:
+  inference_engine_type: hf
+  inference_num_gpus: 1
+  inference_num_gpus_per_engine: 1
+  inference_num_gpus_per_node: 1
+  inference_batch_size: 1
+  store_last_hidden_states: true
+  aux_hidden_states_layers: [1, 5, 9, 13, 17, 21, 25, 29]
+logging:
+  report_to: none
+output_dir: outputs/single_gpu/materialize
+cache_dir: cache/single_gpu/materialize
+model_download_dir: null

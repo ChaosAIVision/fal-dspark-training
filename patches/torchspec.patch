@@ -1,0 +1,219 @@
+diff --git a/tests/test_continual_training_checkpoint.py b/tests/test_continual_training_checkpoint.py
+index d3fd070..981540f 100644
+--- a/tests/test_continual_training_checkpoint.py
++++ b/tests/test_continual_training_checkpoint.py
+@@ -59,3 +59,46 @@ def test_restore_fp32_master_params_keeps_fresh_optimizer_hparams():
+     assert group["weight_decay"] == 0.456
+     assert optimizer.optimizer.state == {}
+     assert torch.equal(optimizer.fp32_params[0].detach(), torch.tensor([42.0], dtype=torch.float32))
++
++
++def test_optimizer_only_resume_loads_optimizer_but_not_scheduler_or_progress(tmp_path):
++    actor = SimpleNamespace(
++        args=SimpleNamespace(
++            load_path=str(tmp_path),
++            ckpt_step=None,
++            continual_training=True,
++            resume_optimizer_state_only=True,
++            start_step=None,
++        ),
++        model=object(),
++        optimizer=object(),
++        lr_scheduler=object(),
++        global_step=0,
++    )
++    (tmp_path / "latest_checkpointed_iteration.txt").write_text("7")
++    model_dir = tmp_path / "iter_0000007" / "model"
++    optimizer_dir = tmp_path / "iter_0000007" / "optimizer"
++    scheduler_dir = tmp_path / "iter_0000007" / "lr_scheduler"
++    for path in (model_dir, optimizer_dir, scheduler_dir):
++        path.mkdir(parents=True)
++    (tmp_path / "iter_0000007" / "meta.json").write_text(
++        '{"global_step": 7, "next_step": 7}'
++    )
++
++    with (
++        mock.patch.object(checkpoint, "ModelState", return_value="model-state"),
++        mock.patch.object(checkpoint, "OptimizerState", return_value="optimizer-state"),
++        mock.patch.object(checkpoint, "LRSchedulerState", return_value="scheduler-state"),
++        mock.patch.object(checkpoint.dcp, "load") as dcp_load,
++        mock.patch.object(checkpoint.dist, "barrier"),
++        mock.patch.object(checkpoint.torch.cuda, "synchronize"),
++    ):
++        payload = checkpoint.load(actor)
++        checkpoint.finalize_load(actor, payload)
++
++    loaded_ids = [call.kwargs["checkpoint_id"] for call in dcp_load.call_args_list]
++    assert str(model_dir) in loaded_ids
++    assert str(optimizer_dir) in loaded_ids
++    assert str(scheduler_dir) not in loaded_ids
++    assert actor.global_step == 0
++    assert actor.args.start_step is None
+diff --git a/torchspec/config/train_config.py b/torchspec/config/train_config.py
+index 4dc0f21..c3103a2 100644
+--- a/torchspec/config/train_config.py
++++ b/torchspec/config/train_config.py
+@@ -42,6 +42,7 @@ class DatasetConfig:
+     last_turn_loss_only: Any = "auto"  # bool or "auto"
+     length_group_size: int = 1024
+     min_loss_tokens: int = 0  # DFlash: skip sequences with < N supervised tokens (use 2*block_size)
++    num_proc: int = 64
+     prompt_key: str = "conversations"
+     shuffle_dataset: bool = True
+     train_data_path: str = ""
+@@ -96,6 +97,10 @@ class TrainingConfig:
+     attention_backend: str = "sdpa"
+     colocate: bool = False
+     continual_training: bool = False
++    # Sharded offline training needs the model, fp32 master parameters, and Adam
++    # moments from the preceding shard, but must start the new shard at sample 0.
++    # Keep the newly configured LR scheduler and do not restore RNG/progress.
++    resume_optimizer_state_only: bool = False
+     distributed_backend: str = "nccl"
+     distributed_timeout_minutes: int = 10
+     draft_accumulation_steps: int = 1
+diff --git a/torchspec/inference/engine/hf_runner.py b/torchspec/inference/engine/hf_runner.py
+index 6a6c75e..2021ef2 100644
+--- a/torchspec/inference/engine/hf_runner.py
++++ b/torchspec/inference/engine/hf_runner.py
+@@ -187,6 +187,7 @@ class HFRunner:
+         self.target_model = HFTargetModel.from_pretrained(
+             pretrained_model_name_or_path=self.config.model_path,
+             torch_dtype=torch_dtype,
++            trust_remote_code=self.config.trust_remote_code,
+         )
+         self.target_model.set_aux_hidden_states_layers(self.config.aux_hidden_states_layers)
+
+diff --git a/torchspec/models/dspark.py b/torchspec/models/dspark.py
+index cffbf16..d9ca67d 100644
+--- a/torchspec/models/dspark.py
++++ b/torchspec/models/dspark.py
+@@ -189,8 +189,14 @@ class DSparkModel(DFlashModel):
+             aligned_target_logits = F.linear(aligned_hidden, lm_head_weight).view(
+                 bsz, n_blocks, self.block_size, vocab_size
+             )
++            # The target branch is frozen, so retaining its full-vocabulary
++            # distribution in FP32 only increases peak memory.  Keep the
++            # trainable draft softmax in FP32, but materialize the teacher
++            # distribution in BF16; subtraction promotes it back to FP32.
++            # This saves ~243 MiB at 64 anchors / 4K tokens / 248K vocab.
++            target_probs = torch.softmax(aligned_target_logits, dim=-1)
++            del aligned_target_logits
+             draft_probs = torch.softmax(logits_4d.float(), dim=-1)
+-            target_probs = torch.softmax(aligned_target_logits.float(), dim=-1)
+             l1_per_token = (draft_probs - target_probs).abs().sum(dim=-1)  # [B, nb, bs]
+             if self.l1_loss_alpha > 0:
+                 l1_num = (l1_per_token * decay_weight_mask).sum()
+diff --git a/torchspec/models/target/eagle3_target_model.py b/torchspec/models/target/eagle3_target_model.py
+index 17d8382..ae59cad 100644
+--- a/torchspec/models/target/eagle3_target_model.py
++++ b/torchspec/models/target/eagle3_target_model.py
+@@ -159,6 +159,12 @@ class HFTargetModel(Eagle3TargetModel):
+         Helper to find the module list containing the transformer layers.
+         Adapts to common architectures (Llama, Qwen, Mistral, OPT, etc.)
+         """
++        if (
++            hasattr(self.model, "model")
++            and hasattr(self.model.model, "language_model")
++            and hasattr(self.model.model.language_model, "layers")
++        ):
++            return self.model.model.language_model.layers
+         if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+             return self.model.model.layers
+         elif hasattr(self.model, "layers"):
+@@ -175,6 +181,12 @@ class HFTargetModel(Eagle3TargetModel):
+         Helper to find the final norm layer (post-transformer, pre-lm_head).
+         Its output is the last hidden states before projection to vocab logits.
+         """
++        if (
++            hasattr(self.model, "model")
++            and hasattr(self.model.model, "language_model")
++            and hasattr(self.model.model.language_model, "norm")
++        ):
++            return self.model.model.language_model.norm
+         if hasattr(self.model, "model") and hasattr(self.model.model, "norm"):
+             return self.model.model.norm
+         elif hasattr(self.model, "norm"):
+diff --git a/torchspec/train_entry.py b/torchspec/train_entry.py
+index 3455250..65352e8 100644
+--- a/torchspec/train_entry.py
++++ b/torchspec/train_entry.py
+@@ -275,10 +275,10 @@ def _validate_and_configure_dflash(args, draft_model_config) -> None:
+     algo = "DSpark" if is_dspark else "DFlash"
+
+     engine_type = getattr(args, "inference_engine_type", "hf")
+-    if engine_type not in ("vllm", "sgl", "trtllm", "offline"):
++    if engine_type not in ("hf", "vllm", "sgl", "trtllm", "offline"):
+         raise NotImplementedError(
+             f"{algo} supports inference_engine_type in "
+-            f"('vllm', 'sgl', 'trtllm', 'offline'), got '{engine_type}'."
++            f"('hf', 'vllm', 'sgl', 'trtllm', 'offline'), got '{engine_type}'."
+         )
+     if getattr(args, "defer_tokenization", False):
+         raise NotImplementedError("DFlash does not support defer_tokenization=True.")
+diff --git a/torchspec/training/checkpoint.py b/torchspec/training/checkpoint.py
+index 8c74ad6..7fb0117 100644
+--- a/torchspec/training/checkpoint.py
++++ b/torchspec/training/checkpoint.py
+@@ -159,9 +159,13 @@ def load(actor: Any) -> dict[str, Any] | None:
+         return None
+
+     continual_training = getattr(actor.args, "continual_training", False)
++    resume_optimizer_state_only = getattr(actor.args, "resume_optimizer_state_only", False)
+
+     # Keep optimizer/LR state out of continual training so it starts fresh.
+-    load_optimizer = not continual_training and hasattr(actor, "optimizer")
++    load_optimizer = (
++        (not continual_training or resume_optimizer_state_only)
++        and hasattr(actor, "optimizer")
++    )
+     if load_optimizer and optimizer_dir.exists():
+         optimizer_state = OptimizerState(actor.model, actor.optimizer)
+         optim_state_dict = {"optim_state": optimizer_state}
+@@ -175,7 +179,10 @@ def load(actor: Any) -> dict[str, Any] | None:
+
+     # Load LR scheduler state (optional)
+     load_lr_scheduler = (
+-        not continual_training and hasattr(actor, "lr_scheduler") and lr_scheduler_dir.exists()
++        not continual_training
++        and not resume_optimizer_state_only
++        and hasattr(actor, "lr_scheduler")
++        and lr_scheduler_dir.exists()
+     )
+     if load_lr_scheduler:
+         lr_scheduler_state = LRSchedulerState(actor.lr_scheduler)
+@@ -253,8 +260,13 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
+         return
+
+     continual_training = getattr(actor.args, "continual_training", False)
++    resume_optimizer_state_only = getattr(actor.args, "resume_optimizer_state_only", False)
+
+-    if checkpoint_payload.get("rng") is not None and not continual_training:
++    if (
++        checkpoint_payload.get("rng") is not None
++        and not continual_training
++        and not resume_optimizer_state_only
++    ):
+         rng_state = checkpoint_payload["rng"]
+         if "torch" in rng_state:
+             torch.set_rng_state(rng_state["torch"])
+@@ -263,16 +275,16 @@ def finalize_load(actor: Any, checkpoint_payload: dict[str, Any] | None) -> None
+
+     metadata = checkpoint_payload.get("metadata") or {}
+     iteration = checkpoint_payload.get("iteration")
+-    if metadata and not continual_training:
++    if metadata and not continual_training and not resume_optimizer_state_only:
+         actor.global_step = int(metadata.get("global_step", actor.global_step))
+         next_step = metadata.get("next_step") or metadata.get("next_inference_id")
+         if next_step is not None:
+             actor.args.start_step = next_step
+-    elif iteration is not None and not continual_training:
++    elif iteration is not None and not continual_training and not resume_optimizer_state_only:
+         if getattr(actor.args, "start_step", None) is None:
+             actor.args.start_step = iteration
+
+-    if continual_training and hasattr(actor, "optimizer"):
++    if continual_training and not resume_optimizer_state_only and hasattr(actor, "optimizer"):
+         _restore_fp32_master_params(actor, checkpoint_payload["optimizer_dir"])
+
+     torch.cuda.synchronize()

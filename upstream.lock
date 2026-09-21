@@ -1,0 +1,4 @@
+TORCHSPEC_REPO=https://github.com/lightseekorg/TorchSpec.git
+TORCHSPEC_COMMIT=47ee0471f496b5717747dbb9600fcd0d426f47ca
+SGLANG_REPO=https://github.com/Dogacel/sglang.git
+SGLANG_COMMIT=fa2890264f521f6520dea8924b888f8f2e4b3c9e

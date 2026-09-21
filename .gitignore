@@ -1,0 +1,19 @@
+.DS_Store
+._*
+.env
+.venv*/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Runtime data and generated artifacts
+cache/
+data/*
+!data/example.jsonl
+logs/
+outputs/
+state/
+tmp/
+
+# Dependencies are reproducibly cloned by bootstrap.sh
+upstream/

@@ -1,0 +1,1 @@
+{"system_prompt":"Return a JSON array only.","input":"Classify this synthetic example.","thinking":"The example belongs to the demonstration class.","output":"[{\"label\":\"demo\",\"score\":1}]"}

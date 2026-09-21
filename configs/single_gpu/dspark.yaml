@@ -1,0 +1,59 @@
+model:
+  target_model_path: null
+  trust_remote_code: true
+  embedding_key: model.language_model.embed_tokens.weight
+  lm_head_key: model.language_model.embed_tokens.weight
+  norm_key: model.language_model.norm.weight
+  draft_model_config: configs/single_gpu/dspark_draft_config.json
+dataset:
+  train_data_path: null
+  eval_data_path: null
+  chat_template: qwen
+  prompt_key: conversations
+  min_loss_tokens: 16
+  num_proc: 4
+  shuffle_dataset: false
+training:
+  attention_backend: flex_attention
+  micro_batch_size: 1
+  draft_accumulation_steps: 16
+  learning_rate: 0.0001
+  min_lr: 0.0001
+  weight_decay: 0.0
+  max_concurrent_batches: 1
+  max_grad_norm: 1.0
+  max_seq_length: 4096
+  num_epochs: 1
+  seed: 42
+  training_num_gpus_per_node: 1
+  training_num_nodes: 1
+  ttt_length: 7
+  fsdp_strategy: REPLICATE
+  fsdp_reduce_dtype: bfloat16
+  prefetch_depth: 1
+  save_interval: 0
+  save_per_epoch: true
+  max_checkpoints: 1
+  warmup_ratio: 0.0
+  continual_training: true
+  resume_optimizer_state_only: true
+  dflash_block_size: 8
+  dspark_num_anchors: 32
+  dspark_num_target_layers: 8
+  dspark_loss_decay_gamma: 4.0
+  dspark_ce_loss_alpha: 0.1
+  dspark_l1_loss_alpha: 0.9
+  dspark_confidence_head_alpha: 1.0
+inference:
+  inference_engine_type: offline
+  inference_batch_size: 1
+  store_last_hidden_states: true
+  aux_hidden_states_layers: [1, 5, 9, 13, 17, 21, 25, 29]
+  offline:
+    data_path: null
+    num_engines: 1
+logging:
+  report_to: none
+output_dir: outputs/single_gpu/dspark
+cache_dir: cache/single_gpu/dspark
+model_download_dir: null
