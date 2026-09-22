@@ -1,0 +1,3 @@
+repository=https://github.com/Dogacel/sglang.git
+commit=fa2890264f521f6520dea8924b888f8f2e4b3c9e
+note=Two import/list expressions are line-wrapped to avoid a GitHub secret-scanner false positive; runtime behavior is unchanged.

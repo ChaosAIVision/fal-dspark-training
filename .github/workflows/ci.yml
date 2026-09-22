@@ -14,7 +14,7 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest PyYAML
       - run: python -m compileall -q pipeline.py scripts tests
-      - run: pytest -q
+      - run: pytest -q tests
       - run: bash -n scripts/*.sh
       - name: Reject private runtime material
         run: |

@@ -34,7 +34,8 @@ chọn nhưng nên đặt để script từ chối chạy nếu thứ tự GPU t
 nvidia-smi --query-gpu=index,uuid,name --format=csv
 ```
 
-Sau đó bootstrap dependency đã pin:
+Source TorchSpec và SGLang đã nằm sẵn trong `upstream/`, đúng commit ghi trong
+`upstream.lock`. Sau đó bootstrap môi trường Python:
 
 ```bash
 ./scripts/bootstrap.sh
@@ -124,6 +125,6 @@ chỉ tăng tốc rõ khi draft khớp target; thêm epoch không đảm bảo a
 
 ## Nguồn upstream
 
-Commit được pin trong `upstream.lock`. `bootstrap.sh` clone đúng commit rồi áp
-dụng `patches/torchspec.patch`, giúp môi trường lần sau tái tạo được thay vì phụ
-thuộc snapshot cục bộ.
+Commit được pin trong `upstream.lock`; toàn bộ source tương ứng được vendor trong
+`upstream/`. `patches/torchspec.patch` lưu riêng phần thay đổi cho continual
+sharded training để dễ review và đối chiếu với upstream gốc.

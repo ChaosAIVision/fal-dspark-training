@@ -1,0 +1,3 @@
+repository=https://github.com/lightseekorg/TorchSpec.git
+commit=47ee0471f496b5717747dbb9600fcd0d426f47ca
+patch=../../patches/torchspec.patch
